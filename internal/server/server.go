@@ -1,0 +1,138 @@
+package server
+
+import (
+	"encoding/json"
+	"log"
+	"net/http"
+
+	"github.com/stockyard-dev/stockyard-menu/internal/store"
+)
+
+type Server struct {
+	db     *store.DB
+	mux    *http.ServeMux
+	limits Limits
+}
+
+func New(db *store.DB, limits Limits) *Server {
+	s := &Server{db: db, mux: http.NewServeMux(), limits: limits}
+	s.mux.HandleFunc("GET /api/categories", s.listCategories)
+	s.mux.HandleFunc("POST /api/categories", s.createCategories)
+	s.mux.HandleFunc("GET /api/categories/{id}", s.getCategories)
+	s.mux.HandleFunc("PUT /api/categories/{id}", s.updateCategories)
+	s.mux.HandleFunc("DELETE /api/categories/{id}", s.delCategories)
+	s.mux.HandleFunc("GET /api/items", s.listItems)
+	s.mux.HandleFunc("POST /api/items", s.createItems)
+	s.mux.HandleFunc("GET /api/items/{id}", s.getItems)
+	s.mux.HandleFunc("PUT /api/items/{id}", s.updateItems)
+	s.mux.HandleFunc("DELETE /api/items/{id}", s.delItems)
+	s.mux.HandleFunc("GET /api/stats", s.stats)
+	s.mux.HandleFunc("GET /api/health", s.health)
+	s.mux.HandleFunc("GET /health", s.health)
+	s.mux.HandleFunc("GET /ui", s.dashboard)
+	s.mux.HandleFunc("GET /ui/", s.dashboard)
+	s.mux.HandleFunc("GET /", s.root)
+	s.mux.HandleFunc("GET /api/tier", func(w http.ResponseWriter, r *http.Request) {
+		wj(w, 200, map[string]any{"tier": s.limits.Tier, "upgrade_url": "https://stockyard.dev/menu/"})})
+	return s
+}
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+func wj(w http.ResponseWriter, c int, v any) { w.Header().Set("Content-Type", "application/json"); w.WriteHeader(c); json.NewEncoder(w).Encode(v) }
+func we(w http.ResponseWriter, c int, m string) { wj(w, c, map[string]string{"error": m}) }
+func (s *Server) root(w http.ResponseWriter, r *http.Request) { if r.URL.Path != "/" { http.NotFound(w, r); return }; http.Redirect(w, r, "/ui", 302) }
+func oe[T any](s []T) []T { if s == nil { return []T{} }; return s }
+func init() { log.SetFlags(log.LstdFlags | log.Lshortfile) }
+
+func (s *Server) listCategories(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	filters := map[string]string{}
+	if q != "" || len(filters) > 0 { wj(w, 200, map[string]any{"categories": oe(s.db.SearchCategories(q, filters))}); return }
+	wj(w, 200, map[string]any{"categories": oe(s.db.ListCategories())})
+}
+
+func (s *Server) createCategories(w http.ResponseWriter, r *http.Request) {
+	if s.limits.MaxItems > 0 { if s.db.CountCategories() >= s.limits.MaxItems { we(w, 402, "Free tier limit reached. Upgrade at https://stockyard.dev/menu/"); return } }
+	var e store.Categories
+	json.NewDecoder(r.Body).Decode(&e)
+	if e.Name == "" { we(w, 400, "name required"); return }
+	s.db.CreateCategories(&e)
+	wj(w, 201, s.db.GetCategories(e.ID))
+}
+
+func (s *Server) getCategories(w http.ResponseWriter, r *http.Request) {
+	e := s.db.GetCategories(r.PathValue("id"))
+	if e == nil { we(w, 404, "not found"); return }
+	wj(w, 200, e)
+}
+
+func (s *Server) updateCategories(w http.ResponseWriter, r *http.Request) {
+	existing := s.db.GetCategories(r.PathValue("id"))
+	if existing == nil { we(w, 404, "not found"); return }
+	var patch store.Categories
+	json.NewDecoder(r.Body).Decode(&patch)
+	patch.ID = existing.ID; patch.CreatedAt = existing.CreatedAt
+	if patch.Name == "" { patch.Name = existing.Name }
+	s.db.UpdateCategories(&patch)
+	wj(w, 200, s.db.GetCategories(patch.ID))
+}
+
+func (s *Server) delCategories(w http.ResponseWriter, r *http.Request) {
+	s.db.DeleteCategories(r.PathValue("id"))
+	wj(w, 200, map[string]string{"deleted": "ok"})
+}
+
+func (s *Server) listItems(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	filters := map[string]string{}
+	if q != "" || len(filters) > 0 { wj(w, 200, map[string]any{"items": oe(s.db.SearchItems(q, filters))}); return }
+	wj(w, 200, map[string]any{"items": oe(s.db.ListItems())})
+}
+
+func (s *Server) createItems(w http.ResponseWriter, r *http.Request) {
+	var e store.Items
+	json.NewDecoder(r.Body).Decode(&e)
+	if e.Name == "" { we(w, 400, "name required"); return }
+	s.db.CreateItems(&e)
+	wj(w, 201, s.db.GetItems(e.ID))
+}
+
+func (s *Server) getItems(w http.ResponseWriter, r *http.Request) {
+	e := s.db.GetItems(r.PathValue("id"))
+	if e == nil { we(w, 404, "not found"); return }
+	wj(w, 200, e)
+}
+
+func (s *Server) updateItems(w http.ResponseWriter, r *http.Request) {
+	existing := s.db.GetItems(r.PathValue("id"))
+	if existing == nil { we(w, 404, "not found"); return }
+	var patch store.Items
+	json.NewDecoder(r.Body).Decode(&patch)
+	patch.ID = existing.ID; patch.CreatedAt = existing.CreatedAt
+	if patch.Name == "" { patch.Name = existing.Name }
+	if patch.Category == "" { patch.Category = existing.Category }
+	if patch.Description == "" { patch.Description = existing.Description }
+	if patch.ImageUrl == "" { patch.ImageUrl = existing.ImageUrl }
+	if patch.Dietary == "" { patch.Dietary = existing.Dietary }
+	s.db.UpdateItems(&patch)
+	wj(w, 200, s.db.GetItems(patch.ID))
+}
+
+func (s *Server) delItems(w http.ResponseWriter, r *http.Request) {
+	s.db.DeleteItems(r.PathValue("id"))
+	wj(w, 200, map[string]string{"deleted": "ok"})
+}
+
+func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
+	m := map[string]any{}
+	m["categories_total"] = s.db.CountCategories()
+	m["items_total"] = s.db.CountItems()
+	wj(w, 200, m)
+}
+
+func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	m := map[string]any{"status": "ok", "service": "menu"}
+	m["categories"] = s.db.CountCategories()
+	m["items"] = s.db.CountItems()
+	wj(w, 200, m)
+}
