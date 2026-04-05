@@ -1,0 +1,12 @@
+version: "3.8"
+services:
+  menu:
+    build: .
+    ports:
+      - "9812:9812"
+    volumes:
+      - menu_data:/data
+    environment:
+      - PORT=9812
+volumes:
+  menu_data:
